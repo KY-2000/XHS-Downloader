@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name           XHS-Downloader
+// @name           XHS-Downloader Enhanced (with Text Content)
 // @namespace      xhs_downloader
 // @homepage       https://github.com/JoeanAmier/XHS-Downloader
 // @version        2.3.1
@@ -21,6 +21,13 @@
 // @grant          GM_setClipboard
 // @grant          GM_registerMenuCommand
 // @grant          GM_unregisterMenuCommand
+// @grant          GM_xmlhttpRequest
+// @connect        xhscdn.com
+// @connect        xiaohongshu.com
+// @connect        ci.xiaohongshu.com
+// @connect        sns-webpic-qc.xhscdn.com
+// @connect        sns-video-al.xhscdn.com
+// @connect        *
 // @license        GNU General Public License v3.0
 // @run-at         document-end
 // @updateURL      https://raw.githubusercontent.com/JoeanAmier/XHS-Downloader/master/static/XHS-Downloader.js
@@ -152,6 +159,8 @@ KS-Downloader（快手、KuaiShou）：https://github.com/JoeanAmier/KS-Download
             extractSearchUsersLinksDescription: '提取搜索结果的用户链接至剪贴板',
             extractAlbumNotesLinksText: '提取专辑作品链接',
             extractAlbumNotesLinksDescription: '提取当前专辑的作品链接至剪贴板',
+            downloadAlbumAllContentText: '下载专辑所有内容',
+            downloadAlbumAllContentDescription: '下载当前专辑的所有作品（图片、视频和文字）',
             modifyScriptSettingsText: '修改用户脚本设置',
             modifyScriptSettingsDescription: '修改用户脚本设置',
             aboutXHSText: '关于 XHS-Downloader',
@@ -280,6 +289,8 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
             extractSearchUsersLinksDescription: 'Extract user links from search results',
             extractAlbumNotesLinksText: 'Extract Album Note Links',
             extractAlbumNotesLinksDescription: 'Extract note links from the current album',
+            downloadAlbumAllContentText: 'Download Album All Content',
+            downloadAlbumAllContentDescription: 'Download all notes with images, videos, and text from current album',
             modifyScriptSettingsText: 'Modify Script Settings',
             modifyScriptSettingsDescription: '',
             aboutXHSText: 'About XHS-Downloader',
@@ -366,6 +377,62 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
         GM_setValue("language", lang);
         t = i18n[lang];
     });
+    
+    // Listen for auto-download messages from album page OR URL parameters
+    const checkAutoDownload = async () => {
+        // Check if URL has auto_download parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const isAutoDownload = urlParams.get('auto_download') === 'true';
+        
+        if (isAutoDownload) {
+            console.log('[XHS-Enhanced] Auto-download triggered via URL parameter');
+            
+            // Wait for page to load
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            // Set currentUrl global variable (needed by extractDownloadLinks)
+            currentUrl = window.location.href;
+            
+            // Temporarily disable image selection modal so all images download automatically
+            const originalImageCheckboxSwitch = config.imageCheckboxSwitch;
+            config.imageCheckboxSwitch = false;
+            
+            try {
+                // Call the EXACT same function that the menu button uses
+                console.log('[XHS-Enhanced] Calling extractDownloadLinks (same as manual download)...');
+                extractDownloadLinks(false);
+                
+                console.log('[XHS-Enhanced] ✓ Auto-download started');
+            } finally {
+                // Restore original setting after a delay
+                setTimeout(() => {
+                    config.imageCheckboxSwitch = originalImageCheckboxSwitch;
+                }, 5000);
+            }
+        }
+    };
+    
+    // Listen for postMessage (backup method)
+    window.addEventListener('message', async (event) => {
+        // Security check - only accept messages from xiaohongshu.com
+        if (event.origin !== 'https://www.xiaohongshu.com') {
+            return;
+        }
+        
+        if (event.data && event.data.type === 'XHS_AUTO_DOWNLOAD') {
+            console.log('[XHS-Enhanced] Received auto-download request via postMessage:', event.data);
+            
+            // Use the same download logic
+            await checkAutoDownload();
+        }
+    });
+    
+    // Check URL on page load
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', checkAutoDownload);
+    } else {
+        checkAutoDownload();
+    }
 
     const updatePackageDownloadFiles = (value) => {
         config.packageDownloadFiles = value;
@@ -542,33 +609,270 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
 
     const exploreDeal = async (note, server = false,) => {
         try {
+            console.log('[XHS-Enhanced] Starting download for post:', note.noteId || note.title);
+            
+            // Auto-scroll to load comments before downloading
+            if (!server) {
+                await scrollToLoadComments();
+            }
+            
             let links;
             if (note.type === "normal") {
                 links = generateImageUrl(note);
+            } else if (note.type === "video") {
+                // Only try to generate video URL if video data exists
+                if (note.video && note.video.media) {
+                    links = generateVideoUrl(note);
+                } else {
+                    console.warn('[XHS-Enhanced] Video data not found, skipping video download');
+                    links = [];
+                }
             } else {
-                links = generateVideoUrl(note);
+                console.warn('[XHS-Enhanced] Unknown note type:', note.type);
+                links = [];
             }
             if (links.length > 0) {
                 // console.debug("下载链接", links);
+                console.log('[XHS-Enhanced] Downloading media files...');
                 await download(links, note, server,);
+                console.log('[XHS-Enhanced] All downloads completed!');
             } else {
                 abnormal(t.downloadLinkError)
             }
         } catch (error) {
-            console.error("Error in exploreDeal function:", error);
+            console.error("[XHS-Enhanced] Error in exploreDeal function:", error);
             abnormal(t.downloadError);
         }
     };
 
     const extractNoteInfo = () => {
-        const data = unsafeWindow.__INITIAL_STATE__?.noteData?.data?.noteData;
-        if (data) return data;
-        const regex = /\/explore\/([^?]+)/;
-        const match = currentUrl.match(regex);
-        if (match) {
-            return unsafeWindow.__INITIAL_STATE__.note.noteDetailMap[match[1]].note;
-        } else {
-            console.error("从链接提取作品 ID 失败", currentUrl,);
+        try {
+            // Get current URL
+            const currentUrl = window.location.href;
+            
+            // Method 1: Try noteData path
+            const data = unsafeWindow.__INITIAL_STATE__?.noteData?.data?.noteData;
+            if (data) {
+                console.log('[XHS-Enhanced] Extracted note info from noteData');
+                return data;
+            }
+            
+            // Method 2: Try noteDetailMap path
+            const regex = /\/explore\/([^?]+)/;
+            const match = currentUrl.match(regex);
+            if (match && match[1]) {
+                const noteId = match[1];
+                const noteDetailMap = unsafeWindow.__INITIAL_STATE__?.note?.noteDetailMap;
+                
+                if (noteDetailMap && noteDetailMap[noteId]) {
+                    const note = noteDetailMap[noteId].note;
+                    if (note) {
+                        console.log('[XHS-Enhanced] Extracted note info from noteDetailMap');
+                        return note;
+                    }
+                }
+            }
+            
+            // Method 3: Log what's available for debugging
+            console.warn('[XHS-Enhanced] Note data not found. Available paths:');
+            console.log('  - __INITIAL_STATE__ exists:', !!unsafeWindow.__INITIAL_STATE__);
+            if (unsafeWindow.__INITIAL_STATE__) {
+                console.log('  - noteData exists:', !!unsafeWindow.__INITIAL_STATE__.noteData);
+                console.log('  - note exists:', !!unsafeWindow.__INITIAL_STATE__.note);
+                console.log('  - Available keys:', Object.keys(unsafeWindow.__INITIAL_STATE__));
+            }
+            console.log('  - Current URL:', currentUrl);
+            
+            return null;
+        } catch (error) {
+            console.error('[XHS-Enhanced] Error in extractNoteInfo:', error);
+            return null;
+        }
+    };
+
+    // Auto-scroll to load comments before download
+    const scrollToLoadComments = async () => {
+        try {
+            console.log('[XHS-Enhanced] Auto-scrolling to load comments...');
+            
+            // Save current scroll position
+            const originalScrollY = window.scrollY;
+            
+            // Scroll down to trigger comment loading
+            const scrollDistance = 1500; // Scroll 1500px down
+            window.scrollTo(0, originalScrollY + scrollDistance);
+            
+            // Wait for content to load
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Scroll a bit more to ensure comments are loaded
+            window.scrollTo(0, originalScrollY + scrollDistance + 500);
+            await new Promise(resolve => setTimeout(resolve, 800));
+            
+            // Scroll back to original position
+            window.scrollTo(0, originalScrollY);
+            await new Promise(resolve => setTimeout(resolve, 300));
+            
+            console.log('[XHS-Enhanced] Comments section loaded');
+            return true;
+        } catch (error) {
+            console.error('[XHS-Enhanced] Auto-scroll failed:', error);
+            return false;
+        }
+    };
+
+    // Extract pinned comment from DOM
+    const extractPinnedComment = () => {
+        try {
+            console.log('[XHS-Enhanced] Searching for pinned comment...');
+            
+            // Wait a bit for comments to load
+            // Method 1: Look for elements with "置顶" (pinned) text
+            const allElements = document.querySelectorAll('*');
+            for (const elem of allElements) {
+                const text = elem.textContent || '';
+                if (text.includes('置顶') && text.length > 10 && text.length < 500) {
+                    // Found an element with "置顶", get the full comment
+                    const commentText = text.replace('置顶', '').trim();
+                    
+                    // Try to find author name nearby
+                    let author = null;
+                    const parent = elem.closest('[class*="comment"], [class*="Comment"], [class*="item"]');
+                    if (parent) {
+                        const authorElem = parent.querySelector('[class*="author"], [class*="user"], [class*="name"], [class*="nick"]');
+                        author = authorElem?.textContent?.trim() || null;
+                    }
+                    
+                    console.log('[XHS-Enhanced] Found pinned comment:', commentText.substring(0, 50) + '...');
+                    return { text: commentText, author: author, isPinned: true };
+                }
+            }
+            
+            // Method 2: Look for pinned indicator icon or badge
+            const pinnedIndicators = document.querySelectorAll('[class*="pin"], [class*="top"], [class*="置顶"]');
+            for (const indicator of pinnedIndicators) {
+                const parent = indicator.closest('[class*="comment"], [class*="Comment"], [class*="item"]');
+                if (parent) {
+                    const commentText = parent.textContent?.replace(/置顶|pinned/gi, '').trim();
+                    if (commentText && commentText.length > 10) {
+                        const author = parent.querySelector('[class*="author"], [class*="user"], [class*="name"]')?.textContent?.trim();
+                        console.log('[XHS-Enhanced] Found pinned comment (method 2):', commentText.substring(0, 50) + '...');
+                        return { text: commentText, author: author || null, isPinned: true };
+                    }
+                }
+            }
+            
+            console.log('[XHS-Enhanced] No pinned comment found in DOM');
+            return null;
+        } catch (error) {
+            console.error('[XHS-Enhanced] Error extracting pinned comment:', error);
+            return null;
+        }
+    };
+
+    // Extract hashtags from description
+    const extractHashtags = (description) => {
+        if (!description) return [];
+        const hashtagRegex = /#([^#\s，。、！；：""''【】《》（）]+)/g;
+        const matches = description.match(hashtagRegex) || [];
+        return matches.map(tag => tag.substring(1));
+    };
+
+    // Extract post metadata as JSON string
+    const generatePostMetadata = (note) => {
+        try {
+            const pinnedComment = extractPinnedComment();
+            const hashtags = extractHashtags(note.desc || note.description);
+            
+            console.log('[XHS-Enhanced] Pinned comment extracted:', pinnedComment ? 'YES' : 'NO');
+            if (pinnedComment) {
+                console.log('[XHS-Enhanced] Pinned comment text:', pinnedComment.text.substring(0, 100) + '...');
+            }
+            
+            const metadata = {
+                noteId: note.noteId,
+                title: note.title,
+                description: note.desc || note.description,
+                hashtags: hashtags,
+                author: {
+                    nickname: note.user?.nickname || note.user?.nickName,
+                    userId: note.user?.userId
+                },
+                publishTime: note.time,
+                type: note.type,
+                stats: {
+                    likes: note.interactInfo?.likedCount,
+                    collects: note.interactInfo?.collectedCount,
+                    comments: note.interactInfo?.commentCount,
+                    shares: note.interactInfo?.shareCount
+                },
+                pinnedComment: pinnedComment,
+                postUrl: window.location.href,
+                extractedAt: new Date().toISOString()
+            };
+            
+            return JSON.stringify(metadata, null, 2);
+        } catch (error) {
+            console.error('[XHS-Enhanced] Failed to generate metadata:', error);
+            return null;
+        }
+    };
+
+    // Generate post content as text string
+    const generatePostContent = (note) => {
+        try {
+            const pinnedComment = extractPinnedComment();
+            const hashtags = extractHashtags(note.desc || note.description);
+            
+            let text = '';
+            text += '='.repeat(60) + '\n';
+            text += 'REDNOTE POST DOWNLOAD\n';
+            text += '='.repeat(60) + '\n\n';
+            text += `Title: ${note.title || 'N/A'}\n`;
+            text += `Author: ${note.user?.nickname || note.user?.nickName || 'N/A'}\n`;
+            text += `Author ID: ${note.user?.userId || 'N/A'}\n`;
+            text += `Post URL: ${window.location.href}\n`;
+            text += `Post ID: ${note.noteId}\n`;
+            text += `Type: ${note.type}\n`;
+            
+            if (note.time) {
+                const date = new Date(note.time);
+                text += `Published: ${date.toLocaleString()}\n`;
+            }
+            
+            text += '\n' + '-'.repeat(60) + '\n\n';
+            text += 'DESCRIPTION:\n';
+            text += (note.desc || note.description || '(No description)') + '\n\n';
+            
+            if (hashtags.length > 0) {
+                text += 'HASHTAGS:\n';
+                text += hashtags.map(tag => `#${tag}`).join(' ') + '\n\n';
+            }
+            
+            if (pinnedComment) {
+                text += '-'.repeat(60) + '\n';
+                text += 'PINNED COMMENT:\n';
+                text += pinnedComment.text + '\n';
+                if (pinnedComment.author) {
+                    text += `by ${pinnedComment.author}\n`;
+                }
+                text += '\n';
+            }
+            
+            text += '-'.repeat(60) + '\n';
+            text += 'STATISTICS:\n';
+            text += `  Likes: ${note.interactInfo?.likedCount || '0'}\n`;
+            text += `  Collects: ${note.interactInfo?.collectedCount || '0'}\n`;
+            text += `  Comments: ${note.interactInfo?.commentCount || '0'}\n`;
+            text += `  Shares: ${note.interactInfo?.shareCount || '0'}\n`;
+            text += '\n' + '='.repeat(60) + '\n';
+            text += `Downloaded: ${new Date().toLocaleString()}\n`;
+            text += '='.repeat(60) + '\n';
+            
+            return text;
+        } catch (error) {
+            console.error('[XHS-Enhanced] Failed to generate post content:', error);
+            return null;
         }
     };
 
@@ -607,21 +911,46 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
     const downloadFile = async (link, name, trigger = true, retries = 5) => {
         for (let attempt = 1; attempt <= retries; attempt++) {
             try {
-                // 使用 fetch 获取文件数据
-                const response = await fetch(link, {
-                    "headers": {
-                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                        "accept-language": "zh-SG,zh;q=0.9",
-                    }, "method": "GET",
+                // Try GM_xmlhttpRequest first (bypasses CORS)
+                const blob = await new Promise((resolve, reject) => {
+                    if (typeof GM_xmlhttpRequest !== 'undefined') {
+                        GM_xmlhttpRequest({
+                            method: 'GET',
+                            url: link,
+                            responseType: 'blob',
+                            headers: {
+                                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                                'accept-language': 'zh-SG,zh;q=0.9',
+                                'referer': 'https://www.xiaohongshu.com/',
+                            },
+                            onload: (response) => {
+                                if (response.status === 200) {
+                                    resolve(response.response);
+                                } else {
+                                    reject(new Error(`HTTP ${response.status}`));
+                                }
+                            },
+                            onerror: (error) => {
+                                reject(error);
+                            },
+                            ontimeout: () => {
+                                reject(new Error('Request timed out'));
+                            },
+                        });
+                    } else {
+                        // Fallback to fetch if GM_xmlhttpRequest not available
+                        fetch(link, {
+                            'headers': {
+                                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                                'accept-language': 'zh-SG,zh;q=0.9',
+                            },
+                            'method': 'GET',
+                        }).then(response => {
+                            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                            return response.blob();
+                        }).then(resolve).catch(reject);
+                    }
                 });
-
-                // 检查响应状态码
-                if (!response.ok) {
-                    console.error(`下载失败，状态码: ${response.status}，URL: ${link}，尝试次数: ${attempt}`);
-                    continue; // 继续下一次尝试
-                }
-
-                const blob = await response.blob();
 
                 if (trigger) {
                     triggerDownload(name, blob);
@@ -632,11 +961,11 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
             } catch (error) {
                 console.error(`下载失败 (${name})，错误信息:`, error, `尝试次数: ${attempt}`);
                 if (attempt === retries) {
-                    return false; // 如果达到最大重试次数，返回失败
+                    return false;
                 }
             }
         }
-        return false; // 如果所有尝试都失败，返回失败
+        return false;
     };
 
     const downloadFiles = async (items, name,) => {
@@ -664,12 +993,40 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
         if (results.every(result => result === true)) {
             try {
                 const zip = new JSZip();
+                
+                // Add all image files
                 downloadResults.forEach((item) => {
                     zip.file(item.name, item.file);
                 });
+                
+                // Add text content files to ZIP
+                try {
+                    // Small delay to ensure comments are loaded
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    const note = extractNoteInfo();
+                    if (note) {
+                        console.log('[XHS-Enhanced] Adding text content to ZIP...');
+                        
+                        const metadataJson = generatePostMetadata(note);
+                        if (metadataJson) {
+                            zip.file('metadata.json', metadataJson);
+                            console.log('[XHS-Enhanced] ✓ Added metadata.json');
+                        }
+                        
+                        const contentText = generatePostContent(note);
+                        if (contentText) {
+                            zip.file('post_content.txt', contentText);
+                            console.log('[XHS-Enhanced] ✓ Added post_content.txt');
+                        }
+                    }
+                } catch (error) {
+                    console.error('[XHS-Enhanced] Failed to add text files to ZIP:', error);
+                }
 
-                const content = await zip.generateAsync({type: "blob", compression: "STORE"});
+                const content = await zip.generateAsync({type: "blob", compression: "DEFLATE", compressionOptions: {level: 6}});
                 triggerDownload(`${name}.zip`, content,)
+                console.log('[XHS-Enhanced] ✓ ZIP file created with all content!');
                 return true;
             } catch (error) {
                 console.error('生成 ZIP 文件或保存失败，错误信息:', error);
@@ -700,12 +1057,36 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
     const downloadVideo = async (url, name) => {
         if (!await downloadFile(url, `${name}.mp4`)) {
             abnormal(t.videoDownloadError);
+        } else {
+            // Add text files for video posts
+            try {
+                const note = extractNoteInfo();
+                if (note) {
+                    console.log('[XHS-Enhanced] Adding text content for video post...');
+                    const metadataJson = generatePostMetadata(note);
+                    if (metadataJson) {
+                        const metadataBlob = new Blob([metadataJson], { type: 'application/json' });
+                        triggerDownload(`${name}_metadata.json`, metadataBlob);
+                        console.log('[XHS-Enhanced] ✓ Downloaded metadata.json');
+                    }
+                    
+                    const contentText = generatePostContent(note);
+                    if (contentText) {
+                        const contentBlob = new Blob([contentText], { type: 'text/plain;charset=utf-8' });
+                        triggerDownload(`${name}_content.txt`, contentBlob);
+                        console.log('[XHS-Enhanced] ✓ Downloaded post_content.txt');
+                    }
+                }
+            } catch (error) {
+                console.error('[XHS-Enhanced] Failed to add text files for video:', error);
+            }
         }
     };
 
     const downloadImage = async (items, name) => {
         let success;
         if (!config.packageDownloadFiles && items.length > 1) {
+            // Multiple images, ZIP disabled - download individually
             let result = [];
             for (let item of items) {
                 result.push(await downloadFile(
@@ -714,13 +1095,54 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
                 ));
             }
             success = result.every(item => item === true);
+            
+            // Add text files
+            if (success) {
+                await addTextFilesToDownload(name);
+            }
         } else if (items.length === 1) {
+            // Single image
             success = await downloadFile(items[0].url, `${name}.${GM_getValue("imageDownloadFormat", "jpeg")}`);
+            
+            // Add text files
+            if (success) {
+                await addTextFilesToDownload(name);
+            }
         } else {
+            // Multiple images, ZIP enabled - handled in downloadFiles()
             success = await downloadFiles(items, name,);
         }
         if (!success) {
             abnormal(t.imageDownloadError);
+        }
+    };
+
+    // Helper function to add text files as separate downloads
+    const addTextFilesToDownload = async (name) => {
+        try {
+            // Small delay to ensure comments are loaded
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            const note = extractNoteInfo();
+            if (note) {
+                console.log('[XHS-Enhanced] Adding text content files...');
+                
+                const metadataJson = generatePostMetadata(note);
+                if (metadataJson) {
+                    const metadataBlob = new Blob([metadataJson], { type: 'application/json' });
+                    triggerDownload(`${name}_metadata.json`, metadataBlob);
+                    console.log('[XHS-Enhanced] ✓ Downloaded metadata.json');
+                }
+                
+                const contentText = generatePostContent(note);
+                if (contentText) {
+                    const contentBlob = new Blob([contentText], { type: 'text/plain;charset=utf-8' });
+                    triggerDownload(`${name}_content.txt`, contentBlob);
+                    console.log('[XHS-Enhanced] ✓ Downloaded post_content.txt');
+                }
+            }
+        } catch (error) {
+            console.error('[XHS-Enhanced] Failed to add text files:', error);
         }
     };
 
@@ -796,6 +1218,358 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
         return notesRawValue.filter(item => item?.noteCard).map(
             item => [item.id, item.xsecToken, item.noteCard.cover.urlDefault, item.noteCard.user.nickName,
                      item.noteCard.displayTitle,]);
+    };
+
+    // Download all content from album/board
+    const downloadAlbumAllContent = async () => {
+        try {
+            console.log('[XHS-Enhanced] Starting album download workflow...');
+            
+            // Get all notes from album
+            const notes = extractBoardInfo();
+            if (notes.length === 0) {
+                alert('No notes found in this album. Please make sure you are on an album page.');
+                return;
+            }
+            
+            console.log(`[XHS-Enhanced] Found ${notes.length} notes in album`);
+            
+            // Show selection modal to choose which notes to download
+            const selectedNotes = await showAlbumNoteSelectionModal(notes);
+            
+            if (!selectedNotes || selectedNotes.length === 0) {
+                console.log('[XHS-Enhanced] No notes selected');
+                return;
+            }
+            
+            console.log(`[XHS-Enhanced] User selected ${selectedNotes.length} notes`);
+            
+            // Confirm with user
+            const confirmed = confirm(
+                `You selected ${selectedNotes.length} notes.\n\n` +
+                `This will:\n` +
+                `1. Open ${selectedNotes.length} tabs with each note\n` +
+                `2. Automatically trigger download on each tab\n` +
+                `3. Each download includes images/videos + metadata.json + post_content.txt\n\n` +
+                `Note: Browser may ask for permission to open multiple tabs.\n` +
+                `Click "Always allow" for best results.\n\n` +
+                `Continue?`
+            );
+            
+            if (!confirmed) {
+                console.log('[XHS-Enhanced] Album download cancelled by user');
+                return;
+            }
+            
+            // Open each selected note in a new tab and trigger download
+            console.log('[XHS-Enhanced] Opening note tabs and triggering downloads...');
+            
+            const openedTabs = [];
+            
+            for (let i = 0; i < selectedNotes.length; i++) {
+                const [noteId, xsecToken, coverUrl, author, title] = selectedNotes[i];
+                // Add auto-download flag to URL
+                const noteUrl = `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${xsecToken}&xsec_source=pc_user&auto_download=true&note_title=${encodeURIComponent(title || '')}`;
+                
+                console.log(`[XHS-Enhanced] Opening note ${i + 1}/${selectedNotes.length}: ${title}`);
+                
+                // Open in new tab
+                const newTab = window.open(noteUrl, `_blank_note_${i}`);
+                
+                if (newTab) {
+                    openedTabs.push(newTab);
+                    
+                    // Wait for page to load and download to complete
+                    // The note page will handle auto-download via URL parameter
+                    // We just need to wait for it to finish
+                    console.log(`[XHS-Enhanced] Waiting for note ${i + 1} to complete download...`);
+                    
+                    // Wait longer for download to complete (15-20 seconds per note)
+                    await new Promise(resolve => setTimeout(resolve, 15000));
+                    
+                    console.log(`[XHS-Enhanced] ✓ Note ${i + 1} download should be complete`);
+                    
+                    // Rate limiting - short pause before next tab
+                    if (i < selectedNotes.length - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
+                } else {
+                    console.error(`[XHS-Enhanced] Failed to open tab for note ${i + 1}. Browser may be blocking popups.`);
+                }
+            }
+            
+            // Show completion message
+            alert(
+                `✅ Opened ${openedTabs.length}/${selectedNotes.length} note tabs!\n\n` +
+                `What happens next:\n` +
+                `• Each tab will automatically download after loading\n` +
+                `• Downloads include: ZIP (images/videos) + metadata.json + post_content.txt\n` +
+                `• Check your browser's download folder\n\n` +
+                `If downloads don't start automatically:\n` +
+                `• Click on each tab manually\n` +
+                `• Click Tampermonkey menu → "Download Note Files"\n\n` +
+                `💡 Tip: Allow popups for xiaohongshu.com for best results.`
+            );
+            
+            console.log(`[XHS-Enhanced] Album workflow completed - ${openedTabs.length} tabs opened`);
+            
+        } catch (error) {
+            console.error('[XHS-Enhanced] Album download workflow failed:', error);
+            alert(`Album download failed: ${error.message}\n\nCheck console for details.`);
+        }
+    };
+    
+    // Show album note selection modal (similar to link extraction)
+    const showAlbumNoteSelectionModal = (notes) => {
+        return new Promise((resolve) => {
+            // Create modal overlay
+            const overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:99998;display:flex;align-items:center;justify-content:center;';
+            
+            // Create modal container
+            const modal = document.createElement('div');
+            modal.style.cssText = 'background:white;border-radius:12px;padding:24px;max-width:800px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.3);';
+            
+            // Header
+            const header = document.createElement('div');
+            header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid #f0f0f0;';
+            header.innerHTML = `
+                <h2 style="margin:0;color:#333;">📦 Select Notes to Download</h2>
+                <button id="close-modal" style="background:none;border:none;font-size:24px;cursor:pointer;color:#999;">&times;</button>
+            `;
+            
+            // Action buttons
+            const actions = document.createElement('div');
+            actions.style.cssText = 'display:flex;gap:10px;margin-bottom:16px;';
+            actions.innerHTML = `
+                <button id="select-all" style="padding:8px 16px;background:#2196F3;color:white;border:none;border-radius:6px;cursor:pointer;font-size:14px;">Select All</button>
+                <button id="deselect-all" style="padding:8px 16px;background:#f0f0f0;color:#333;border:none;border-radius:6px;cursor:pointer;font-size:14px;">Deselect All</button>
+                <span style="margin-left:auto;color:#666;font-size:14px;line-height:36px;">Selected: <span id="selected-count">0</span> / ${notes.length}</span>
+            `;
+            
+            // Notes grid
+            const grid = document.createElement('div');
+            grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill, minmax(200px, 1fr));gap:16px;max-height:50vh;overflow-y:auto;padding:8px;';
+            
+            const selectedIndices = new Set();
+            
+            // Create note cards
+            notes.forEach((note, index) => {
+                const [noteId, xsecToken, coverUrl, author, title] = note;
+                
+                const card = document.createElement('div');
+                card.className = 'note-card';
+                card.style.cssText = `border:2px solid #e0e0e0;border-radius:8px;overflow:hidden;cursor:pointer;transition:all 0.2s;background:white;`;
+                card.innerHTML = `
+                    <div style="position:relative;padding-top:133%;background:#f5f5f5;overflow:hidden;">
+                        <img src="${coverUrl}" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'">
+                        <div class="check-indicator" style="position:absolute;top:8px;right:8px;width:24px;height:24px;border-radius:50%;background:rgba(255,255,255,0.9);border:2px solid #ccc;display:flex;align-items:center;justify-content:center;font-size:14px;color:transparent;">✓</div>
+                    </div>
+                    <div style="padding:12px;">
+                        <div style="font-size:14px;font-weight:600;color:#333;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${title || 'Untitled'}</div>
+                        <div style="font-size:12px;color:#999;">${author || 'Unknown'}</div>
+                    </div>
+                `;
+                
+                card.addEventListener('click', () => {
+                    if (selectedIndices.has(index)) {
+                        selectedIndices.delete(index);
+                        card.style.borderColor = '#e0e0e0';
+                        const indicator = card.querySelector('.check-indicator');
+                        indicator.style.borderColor = '#ccc';
+                        indicator.style.background = 'rgba(255,255,255,0.9)';
+                        indicator.style.color = 'transparent';
+                    } else {
+                        selectedIndices.add(index);
+                        card.style.borderColor = '#2196F3';
+                        const indicator = card.querySelector('.check-indicator');
+                        indicator.style.borderColor = '#2196F3';
+                        indicator.style.background = '#2196F3';
+                        indicator.style.color = 'white';
+                    }
+                    document.getElementById('selected-count').textContent = selectedIndices.size;
+                    const downloadBtn = document.getElementById('start-download');
+                    if (selectedIndices.size > 0) {
+                        downloadBtn.disabled = false;
+                        downloadBtn.style.opacity = '1';
+                        downloadBtn.style.cursor = 'pointer';
+                    } else {
+                        downloadBtn.disabled = true;
+                        downloadBtn.style.opacity = '0.5';
+                        downloadBtn.style.cursor = 'not-allowed';
+                    }
+                    downloadBtn.textContent = `Download Selected (${selectedIndices.size})`;
+                });
+                
+                grid.appendChild(card);
+            });
+            
+            // Footer buttons
+            const footer = document.createElement('div');
+            footer.style.cssText = 'display:flex;gap:12px;margin-top:20px;padding-top:16px;border-top:2px solid #f0f0f0;';
+            footer.innerHTML = `
+                <button id="cancel-download" style="flex:1;padding:12px;background:#f0f0f0;color:#666;border:none;border-radius:8px;cursor:pointer;font-size:16px;font-weight:600;">Cancel</button>
+                <button id="start-download" style="flex:1;padding:12px;background:#2196F3;color:white;border:none;border-radius:8px;cursor:pointer;font-size:16px;font-weight:600;opacity:0.5;" disabled>Download Selected (0)</button>
+            `;
+            
+            // Assemble modal
+            modal.appendChild(header);
+            modal.appendChild(actions);
+            modal.appendChild(grid);
+            modal.appendChild(footer);
+            overlay.appendChild(modal);
+            document.body.appendChild(overlay);
+            
+            // Event handlers
+            document.getElementById('close-modal').addEventListener('click', () => {
+                document.body.removeChild(overlay);
+                resolve([]);
+            });
+            
+            document.getElementById('cancel-download').addEventListener('click', () => {
+                document.body.removeChild(overlay);
+                resolve([]);
+            });
+            
+            document.getElementById('select-all').addEventListener('click', () => {
+                selectedIndices.clear();
+                notes.forEach((_, i) => selectedIndices.add(i));
+                
+                // Update all note cards
+                const cards = grid.querySelectorAll('.note-card');
+                cards.forEach((card, i) => {
+                    card.style.borderColor = '#2196F3';
+                    const indicator = card.querySelector('.check-indicator');
+                    indicator.style.borderColor = '#2196F3';
+                    indicator.style.background = '#2196F3';
+                    indicator.style.color = 'white';
+                });
+                
+                document.getElementById('selected-count').textContent = selectedIndices.size;
+                const downloadBtn = document.getElementById('start-download');
+                downloadBtn.disabled = false;
+                downloadBtn.style.opacity = '1';
+                downloadBtn.style.cursor = 'pointer';
+                downloadBtn.textContent = `Download Selected (${selectedIndices.size})`;
+            });
+            
+            document.getElementById('deselect-all').addEventListener('click', () => {
+                selectedIndices.clear();
+                
+                // Update all note cards
+                const cards = grid.querySelectorAll('.note-card');
+                cards.forEach((card) => {
+                    card.style.borderColor = '#e0e0e0';
+                    const indicator = card.querySelector('.check-indicator');
+                    indicator.style.borderColor = '#ccc';
+                    indicator.style.background = 'rgba(255,255,255,0.9)';
+                    indicator.style.color = 'transparent';
+                });
+                
+                document.getElementById('selected-count').textContent = '0';
+                const downloadBtn = document.getElementById('start-download');
+                downloadBtn.disabled = true;
+                downloadBtn.style.opacity = '0.5';
+                downloadBtn.style.cursor = 'not-allowed';
+                downloadBtn.textContent = `Download Selected (0)`;
+            });
+            
+            document.getElementById('start-download').addEventListener('click', () => {
+                document.body.removeChild(overlay);
+                const selectedNotes = Array.from(selectedIndices).map(i => notes[i]);
+                resolve(selectedNotes);
+            });
+            
+            // Click outside to close
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) {
+                    document.body.removeChild(overlay);
+                    resolve([]);
+                }
+            });
+        });
+    };
+    
+    // Download single note content (helper for album download)
+    const downloadNoteContent = async (note, fileName) => {
+        try {
+            console.log(`[XHS-Enhanced] Downloading note: ${fileName}`);
+            
+            // Get media URLs
+            let links = [];
+            if (note.type === 'normal') {
+                links = generateImageUrl(note);
+            } else if (note.type === 'video') {
+                links = generateVideoUrl(note);
+            }
+            
+            if (links.length === 0) {
+                console.warn(`[XHS-Enhanced] No media links found for note: ${fileName}`);
+                return;
+            }
+            
+            // Create ZIP with all content
+            const zip = new JSZip();
+            
+            // Download and add media files to ZIP
+            if (note.type === 'video') {
+                // Download video
+                console.log('[XHS-Enhanced] Downloading video...');
+                const videoBlob = await downloadFile(links[0], `${fileName}.mp4`, false);
+                if (videoBlob) {
+                    zip.file('video.mp4', videoBlob);
+                    console.log('[XHS-Enhanced] ✓ Added video.mp4 to ZIP');
+                }
+            } else {
+                // Download images
+                const items = extractImageWebpUrls(note, links);
+                if (items.length > 0) {
+                    console.log(`[XHS-Enhanced] Downloading ${items.length} images...`);
+                    const imageFolder = zip.folder('images');
+                    
+                    for (const item of items) {
+                        const imageBlob = await downloadFile(item.url, `${fileName}_${item.index}.jpg`, false);
+                        if (imageBlob) {
+                            imageFolder.file(`${String(item.index).padStart(2, '0')}.jpg`, imageBlob);
+                        }
+                    }
+                    console.log('[XHS-Enhanced] ✓ Added images to ZIP');
+                }
+            }
+            
+            // Add text content files to ZIP
+            console.log('[XHS-Enhanced] Adding text content to ZIP...');
+            
+            // Small delay to ensure comments are loaded
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            const metadataJson = generatePostMetadata(note);
+            if (metadataJson) {
+                zip.file('metadata.json', metadataJson);
+                console.log('[XHS-Enhanced] ✓ Added metadata.json to ZIP');
+            }
+            
+            const contentText = generatePostContent(note);
+            if (contentText) {
+                zip.file('post_content.txt', contentText);
+                console.log('[XHS-Enhanced] ✓ Added post_content.txt to ZIP');
+            }
+            
+            // Generate and download ZIP
+            console.log('[XHS-Enhanced] Creating ZIP file...');
+            const zipBlob = await zip.generateAsync({
+                type: 'blob',
+                compression: 'DEFLATE',
+                compressionOptions: { level: 6 }
+            });
+            
+            triggerDownload(`${fileName}.zip`, zipBlob);
+            console.log(`[XHS-Enhanced] ✓ Downloaded ${fileName}.zip`);
+            
+        } catch (error) {
+            console.error(`[XHS-Enhanced] Failed to download note content: ${fileName}`, error);
+            throw error;
+        }
     };
 
     const extractBoardInfo = () => {
@@ -2319,6 +3093,11 @@ Discord Community: https://discord.com/invite/ZYtmgKud9Y
                                icon: ' ⛓ ',
                                action: () => extractAllLinksEvent(5),
                                description: t.extractAlbumNotesLinksDescription
+                           }, {
+                               text: t.downloadAlbumAllContentText,
+                               icon: ' 📦 ',
+                               action: () => downloadAlbumAllContent(),
+                               description: t.downloadAlbumAllContentDescription
                            },);
         }
 

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+function createIcon(size) {
+  canvas.width = size;
+  canvas.height = size;
+  
+  // Blue background
+  ctx.fillStyle = '#2196F3';
+  ctx.fillRect(0, 0, size, size);
+  
+  // White download arrow
+  ctx.fillStyle = 'white';
+  const center = size / 2;
+  const arrowSize = size / 4;
+  
+  // Arrow head
+  ctx.beginPath();
+  ctx.moveTo(center, center + arrowSize);
+  ctx.lineTo(center - arrowSize, center - arrowSize/2);
+  ctx.lineTo(center + arrowSize, center - arrowSize/2);
+  ctx.closePath();
+  ctx.fill();
+  
+  // Arrow shaft
+  const shaftWidth = arrowSize / 3;
+  ctx.fillRect(center - shaftWidth/2, center - arrowSize, shaftWidth, arrowSize * 1.5);
+  
+  // Download
+  const link = document.createElement('a');
+  link.download = `icon${size}.png`;
+  link.href = canvas.toDataURL();
+  link.click();
+}
+
+createIcon(16);
+setTimeout(() => createIcon(48), 500);
+setTimeout(() => createIcon(128), 1000);
+</script>
+</body>
+</html>
