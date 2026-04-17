@@ -4,7 +4,7 @@ aiofiles==25.1.0
     # via xhs-downloader (pyproject.toml)
 aiosqlite==0.22.1
     # via xhs-downloader (pyproject.toml)
-click==8.3.1
+click==8.3.2
     # via xhs-downloader (pyproject.toml)
 emoji==2.15.0
     # via xhs-downloader (pyproject.toml)
@@ -20,9 +20,9 @@ pyperclip==1.11.0
     # via xhs-downloader (pyproject.toml)
 pyyaml==6.0.3
     # via xhs-downloader (pyproject.toml)
-textual==8.2.0
+textual==8.2.3
     # via xhs-downloader (pyproject.toml)
-uvicorn==0.42.0
+uvicorn==0.44.0
     # via xhs-downloader (pyproject.toml)
 websockets==16.0
     # via xhs-downloader (pyproject.toml)
